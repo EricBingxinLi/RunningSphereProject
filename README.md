@@ -66,9 +66,9 @@ failed.mp3 (failure sound)
 - Local storage for high scores
 
 ## Credits
-- Font: *Kids Magazine* (include proper attribution if commercial)
-- Background Music: *云中花遥开 - 居夏而夏* (replace with actual credit)
-- Sound Effects: Custom or CC0 assets (specify source)
+- Font: *Kids Magazine* (by imagex)
+- Background Music: *云中花遥开 - 居夏而夏* (NetEase Cloud Music.org)
+- Sound Effects: Custom or CC0 assets (by u_3bsnvt0dsu)
 
 ## License
 MIT License - free for educational and personal use
