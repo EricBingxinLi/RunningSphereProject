@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>RunningSphere</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+      overflow: hidden;
+      height: 100%;
+      font-family: 'Kids Magazine', 'Comic Sans MS', cursive;
+    }
+    canvas {
+      display: block;
+      background: #87CEEB;
+    }
+    @font-face {
+      font-family: 'Kids Magazine';
+      src: url('kids-magazine.ttf') format('truetype');
+    }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<audio id="bgMusic" loop>
+  <source src="云中花遥开 - 居夏而夏.mp3" type="audio/mpeg">
+</audio>
+<audio id="failSound">
+  <source src="failed.mp3" type="audio/mpeg">
+</audio>
+
+<script>
+// ========== Audio Elements ==========
+const bgMusic = document.getElementById('bgMusic');
+const failSound = document.getElementById('failSound');
+
+// ========== Canvas and Context ==========
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+// Font settings
+const gameFont = "24px 'Kids Magazine', 'Comic Sans MS', cursive";
+
+// Make the canvas fit the browser window
+let horizon;
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  horizon = canvas.height * 0.3;
+}
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+
+// ========== Game State ==========
+let gameOver = false;
+let gameStarted = false;
+let score = 0;
+let highestScore = localStorage.getItem('highestScore') || 0;
+
+// ========== Basic Scene Settings ==========
+const cameraDepth = 300;
+let cameraZ = 0;
+let speed = 2;
+const minSpeed = 2, maxSpeed = 10;
+
+// ========== Road Settings ==========
+const roadWidth = 300;
+const maxDist = 1000;
+
+// ========== Cloud Settings ==========
+let cloudImg = new Image();
+cloudImg.src = 'cloud1.png';
+const maxClouds = 5;
+let clouds = [];
+
+// ========== Road Curvature (Random Bends) ==========
+let roadSegments = [];
+function generateRoadSegments(upToZ) {
+  let lastEnd = roadSegments.length ? roadSegments[roadSegments.length - 1].end : 0;
+  let lastOffset = roadSegments.length ? roadSegments[roadSegments.length - 1].endOffset : 0;
+  while (lastEnd < upToZ) {
+    let segmentLength = 200 + Math.random() * 400;
+    let newEnd = lastEnd + segmentLength;
+    let newEndOffset = lastOffset + (Math.random() * 100 - 50);
+    roadSegments.push({ start: lastEnd, end: newEnd, startOffset: lastOffset, endOffset: newEndOffset });
+    lastEnd = newEnd;
+    lastOffset = newEndOffset;
+  }
+}
+
+function getRoadOffset(z) {
+  if (roadSegments.length === 0 || roadSegments[roadSegments.length - 1].end < z) {
+    generateRoadSegments(z + 1000);
+  }
+  for (let seg of roadSegments) {
+    if (z >= seg.start && z <= seg.end) {
+      let t = (z - seg.start) / (seg.end - seg.start);
+      return seg.startOffset + t * (seg.endOffset - seg.startOffset);
+    }
+  }
+  return 0;
+}
+
+// ========== Camera Vertical Offset (Jump) ==========
+function getRoadHeight(z) {
+  if (z >= 600 && z < 700) return z - 600;
+  if (z >= 700 && z < 800) return 100 - (z - 700);
+  return 0;
+}
+let cameraY = 0;
+
+// ========== Player (Ball) Settings ==========
+const ball = { x: 0, z: 10, y: 0, radius: 15 };
+let isFalling = false;
+let fallVelocity = 0;
+let fallStartTime = 0;
+const GRAVITY = 1.5;
+const FALL_DRIFT = 4;
+
+// ========== Obstacle Images ==========
+const obstacleTypes = [
+  { type: 'rock', path: 'rock.png' },
+  { type: 'rock', path: 'rock2.png' },
+  { type: 'rock', path: 'rock3.png' },
+  { type: 'tree', path: 'tree.png' }
+];
+
+let obstacleImages = [];
+let imagesLoaded = 0;
+
+function loadObstacleImages() {
+  obstacleTypes.forEach(obstacle => {
+    const img = new Image();
+    img.src = obstacle.path;
+    img.onload = () => {
+      imagesLoaded++;
+      if (imagesLoaded === obstacleTypes.length) {
+        initGame();
+      }
+    };
+    obstacleImages.push({ img: img, type: obstacle.type });
+  });
+}
+
+// ========== Obstacles ==========
+let obstacles = [];
+const obstacleSpacing = 150;
+let nextObstacleZ = 200;
+
+function createObstacle(z) {
+  const randomIndex = Math.floor(Math.random() * obstacleImages.length);
+  const chosenObstacle = obstacleImages[randomIndex];
+  const type = chosenObstacle.type;
+
+  let minSize = type === 'tree' ? 80 : 40;
+  let maxSize = type === 'tree' ? 120 : 80;
+  const size = minSize + Math.random() * (maxSize - minSize);
+  const margin = type === 'tree' ? 50 : 30;
+  const obsLocalX = Math.random() * (roadWidth - 2 * margin) - (roadWidth / 2 - margin);
+
+  return { img: chosenObstacle.img, type, x: obsLocalX, z, size };
+}
+
+function generateObstacles() {
+  while (nextObstacleZ < cameraZ + maxDist) {
+    obstacles.push(createObstacle(nextObstacleZ));
+    nextObstacleZ += obstacleSpacing + Math.random() * 100;
+  }
+}
+
+function drawObstacle(obs) {
+  const proj = project(obs.x, obs.z);
+  const scale = proj.scale;
+  const w = obs.size * scale;
+  const h = obs.size * scale;
+  ctx.drawImage(obs.img, proj.x - w/2, proj.y - h, w, h);
+}
+
+// ========== Rails: Black/Yellow stripes ==========
+function drawStripedRail(x1, y1, x2, y2) {
+  const totalLen = Math.hypot(x2 - x1, y2 - y1);
+  const segments = Math.floor(totalLen / 10);
+  let angle = Math.atan2(y2 - y1, x2 - x1);
+  
+  let currX = x1, currY = y1;
+  const dx = Math.cos(angle) * 10;
+  const dy = Math.sin(angle) * 10;
+  
+  for (let i = 0; i < segments; i++) {
+    ctx.beginPath();
+    ctx.strokeStyle = (i % 2 === 0) ? "#000000" : "#FFD700";
+    ctx.lineWidth = 6;
+    ctx.moveTo(currX, currY);
+    ctx.lineTo(currX + dx, currY + dy);
+    ctx.stroke();
+    currX += dx;
+    currY += dy;
+  }
+}
+
+// ========== Perspective Projection ==========
+function project(localX, worldZ) {
+  const dz = worldZ - cameraZ;
+  const scale = cameraDepth / (dz + cameraDepth);
+  const objectGlobalX = getRoadOffset(worldZ) + localX;
+  const cameraGlobalX = getRoadOffset(cameraZ);
+  const x = canvas.width/2 + (objectGlobalX - cameraGlobalX) * scale;
+  const y = horizon + cameraY * scale + (canvas.height - horizon) * scale;
+  return { x, y, scale, dz };
+}
+
+// ========== Input Handling ==========
+const keys = {};
+window.addEventListener("keydown", (e) => {
+  keys[e.key] = true;
+  if (gameOver && (e.key === "r" || e.key === "R")) {
+    initGame();
+  }
+  if (e.key === "Enter" && !gameStarted) {
+    gameStarted = true;
+    bgMusic.play();
+    initGame();
+  }
+});
+window.addEventListener("keyup", (e) => { keys[e.key] = false; });
+
+// ========== Collisions ==========
+function checkCollisions() {
+  const playerZ = cameraZ + ball.z;
+  const playerGlobalX = getRoadOffset(playerZ) + ball.x;
+  
+  for (let obs of obstacles) {
+    if (Math.abs(obs.z - playerZ) < 15) {
+      const obsGlobalX = getRoadOffset(obs.z) + obs.x;
+      const obsRadius = obs.size * (obs.type === 'tree' ? 0.3 : 0.4);
+      if (Math.abs(obsGlobalX - playerGlobalX) < (obsRadius + ball.radius)) {
+        gameOver = true;
+        bgMusic.pause();
+        failSound.play();
+        if (score > highestScore) {
+          highestScore = score;
+          localStorage.setItem('highestScore', highestScore);
+        }
+        return;
+      }
+    }
+  }
+  
+  if (!isFalling && (ball.x < -roadWidth/2 + ball.radius || ball.x > roadWidth/2 - ball.radius)) {
+    isFalling = true;
+    fallStartTime = Date.now();
+    fallVelocity = 0;
+    ball.y = 0;
+    bgMusic.pause();
+    failSound.play();
+  }
+}
+
+// ========== Update ==========
+function updateGame() {
+  if (gameOver) return;
+
+  if (isFalling) {
+    const fallDuration = (Date.now() - fallStartTime) / 1000;
+    
+    if (fallDuration >= 3) {
+      gameOver = true;
+      if (score > highestScore) {
+        highestScore = score;
+        localStorage.setItem('highestScore', highestScore);
+      }
+      return;
+    }
+    
+    fallVelocity += GRAVITY;
+    ball.y += fallVelocity;
+    
+    ball.x += (ball.x > 0 ? FALL_DRIFT : -FALL_DRIFT);
+    return;
+  }
+
+  if (keys["ArrowUp"]) speed = Math.min(speed + 0.1, maxSpeed);
+  if (keys["ArrowDown"]) speed = Math.max(speed - 0.1, minSpeed);
+
+  cameraZ += speed;
+  score = Math.floor(cameraZ);
+
+  if (keys["ArrowLeft"]) ball.x -= 4;
+  if (keys["ArrowRight"]) ball.x += 4;
+
+  cameraY = getRoadHeight(cameraZ);
+  generateObstacles();
+  obstacles = obstacles.filter(obs => (obs.z - cameraZ) > 0);
+  
+  clouds.forEach(cloud => {
+    cloud.x += cloud.speed;
+    if (cloud.x > canvas.width + 150 * cloud.scale) {
+      cloud.x = -150 * cloud.scale;
+      cloud.y = Math.random() * horizon * 0.8;
+    }
+  });
+  
+  checkCollisions();
+}
+
+// ========== Draw ==========
+function drawGame() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (cloudImg.complete) {
+    clouds.forEach(cloud => {
+      ctx.drawImage(
+        cloudImg,
+        cloud.x,
+        cloud.y,
+        150 * cloud.scale,
+        75 * cloud.scale
+      );
+    });
+  }
+
+  const nearZ = cameraZ;
+  const farZ = cameraZ + maxDist;
+  const nearLeft = project(-roadWidth/2, nearZ);
+  const nearRight = project(roadWidth/2, nearZ);
+  const farLeft = project(-roadWidth/2, farZ);
+  const farRight = project(roadWidth/2, farZ);
+
+  const woodGradient = ctx.createLinearGradient(0, nearLeft.y, 0, farLeft.y);
+  woodGradient.addColorStop(0, "#CDAF95");
+  woodGradient.addColorStop(1, "#DEB887");
+  ctx.fillStyle = woodGradient;
+  ctx.beginPath();
+  ctx.moveTo(nearLeft.x, nearLeft.y);
+  ctx.lineTo(nearRight.x, nearRight.y);
+  ctx.lineTo(farRight.x, farRight.y);
+  ctx.lineTo(farLeft.x, farLeft.y);
+  ctx.closePath();
+  ctx.fill();
+
+  const segments = 20;
+  for (let i = 0; i < segments; i++) {
+    const z1 = cameraZ + maxDist * (i/segments);
+    const z2 = cameraZ + maxDist * ((i+0.1)/segments);
+    drawStripedRail(project(-roadWidth/2, z1).x, project(-roadWidth/2, z1).y, 
+                   project(-roadWidth/2, z2).x, project(-roadWidth/2, z2).y);
+    drawStripedRail(project(roadWidth/2, z1).x, project(roadWidth/2, z1).y, 
+                   project(roadWidth/2, z2).x, project(roadWidth/2, z2).y);
+  }
+
+  ctx.strokeStyle = "#FFF";
+  ctx.lineWidth = 2;
+  for (let i = 0; i < segments; i++) {
+    const z1 = cameraZ + maxDist * (i/segments);
+    const z2 = cameraZ + maxDist * ((i+0.5)/segments);
+    const p1 = project(0, z1);
+    const p2 = project(0, z2);
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+  }
+
+  for (let obs of obstacles) drawObstacle(obs);
+
+  const playerProj = project(ball.x, cameraZ + ball.z);
+  const ballScreenRadius = ball.radius * playerProj.scale;
+  const fallOffset = ball.y * playerProj.scale;
+  
+  const gradient = ctx.createRadialGradient(
+    playerProj.x - ballScreenRadius*0.3, 
+    playerProj.y - ballScreenRadius*0.5 + fallOffset,
+    ballScreenRadius*0.1,
+    playerProj.x, 
+    playerProj.y + fallOffset, 
+    ballScreenRadius
+  );
+  gradient.addColorStop(0, "#D3D3D3");
+  gradient.addColorStop(1, "#555555");
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(
+    playerProj.x, 
+    playerProj.y - ballScreenRadius + fallOffset, 
+    ballScreenRadius, 
+    0, 
+    Math.PI*2
+  );
+  ctx.fill();
+
+  ctx.fillStyle = "black";
+  ctx.font = gameFont;
+  ctx.fillText("Distance: " + score, 10, 30);
+  ctx.fillText("Highest: " + highestScore, 10, 60);
+
+  if (gameOver) {
+    ctx.fillStyle = "red";
+    ctx.font = "48px 'Kids Magazine', 'Comic Sans MS', cursive";
+    ctx.fillText("Game Over", canvas.width/2 - 120, canvas.height/2);
+    ctx.font = "24px 'Kids Magazine', 'Comic Sans MS', cursive";
+    ctx.fillText("Press R to Restart", canvas.width/2 - 100, canvas.height/2 + 40);
+  }
+
+  if (!gameStarted) {
+    ctx.fillStyle = "blue";
+    ctx.font = "48px 'Kids Magazine', 'Comic Sans MS', cursive";
+    ctx.fillText("Press Enter to Start", canvas.width/2 - 180, canvas.height/2);
+  }
+}
+
+// ========== Main Loop ==========
+function gameLoop() {
+  if (gameStarted && !gameOver) {
+    updateGame();
+  }
+  drawGame();
+  requestAnimationFrame(gameLoop);
+}
+
+// ========== Initialization ==========
+function initGame() {
+  cameraZ = 0;
+  speed = 2;
+  score = 0;
+  ball.x = 0;
+  ball.y = 0;
+  obstacles = [];
+  nextObstacleZ = 200;
+  gameOver = false;
+  isFalling = false;
+  fallVelocity = 0;
+  fallStartTime = 0;
+  roadSegments = [];
+  
+  bgMusic.currentTime = 0;
+  if(gameStarted) bgMusic.play();
+  failSound.pause();
+  failSound.currentTime = 0;
+
+  clouds = [];
+  for (let i = 0; i < maxClouds; i++) {
+    clouds.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * horizon * 0.8,
+      speed: 0.1 + Math.random() * 0.2,
+      scale: 0.3 + Math.random() * 0.3
+    });
+  }
+}
+
+loadObstacleImages();
+gameLoop();
+</script>
+</body>
+</html>
